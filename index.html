@@ -34,53 +34,107 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans
 // Solo se registra si el navegador lo soporta y el contexto es seguro.
 // ================================================================
 if ('serviceWorker' in navigator && window.isSecureContext) {
+  // CACHE_VERSION: súbela cada vez que publiques una versión nueva.
+  var THRYX_SW_VERSION = 'thryx-v2';
+
   var swCode = `
-const CACHE_NAME = 'thryx-v1';
-const CORE = ['./', './Thryx.html', './lib/tf.min.js', './movenet/model.json'];
+const CACHE_NAME = '${THRYX_SW_VERSION}';
+
 self.addEventListener('install', e => {
-  e.waitUntil(
-    caches.open(CACHE_NAME).then(c =>
-      Promise.allSettled(CORE.map(u => c.add(u).catch(() => {})))
-    )
-  );
-  self.skipWaiting();
+  self.skipWaiting();               // activar la versión nueva de inmediato
 });
+
 self.addEventListener('activate', e => {
   e.waitUntil(
-    caches.keys().then(ks =>
-      Promise.all(ks.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
-    )
+    caches.keys()
+      .then(ks => Promise.all(ks.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
+
 self.addEventListener('fetch', e => {
-  const url = new URL(e.request.url);
-  if (['googleapis.com','gstatic.com','jsdelivr.net','tfhub.dev'].some(h => url.hostname.includes(h))) {
-    e.respondWith(fetch(e.request).catch(() => new Response('', {status: 503})));
+  const req = e.request;
+  const url = new URL(req.url);
+
+  // APIs externas: siempre a la red, nunca cachear
+  if (['googleapis.com','gstatic.com','jsdelivr.net','tfhub.dev','anthropic.com','openfoodfacts.org','esm.sh']
+      .some(h => url.hostname.includes(h))) {
+    e.respondWith(fetch(req).catch(() => new Response('', { status: 503 })));
     return;
   }
+
+  // El HTML (la app) SIEMPRE se pide a la red primero.
+  // Así, en cuanto subes una versión nueva, el móvil la ve.
+  // La caché solo se usa si no hay internet.
+  const esHTML = req.mode === 'navigate' ||
+                 (req.headers.get('accept') || '').includes('text/html');
+
+  if (esHTML) {
+    e.respondWith(
+      fetch(req)
+        .then(r => {
+          const copia = r.clone();
+          caches.open(CACHE_NAME).then(c => c.put(req, copia)).catch(() => {});
+          return r;
+        })
+        .catch(() => caches.match(req).then(c => c || caches.match('./index.html')))
+    );
+    return;
+  }
+
+  // Recursos estáticos (imágenes, scripts): caché primero, red de respaldo
   e.respondWith(
-    caches.match(e.request).then(cached => cached || fetch(e.request).then(r => {
-      if (r && r.status === 200) {
-        const clone = r.clone();
-        caches.open(CACHE_NAME).then(c => c.put(e.request, clone));
-      }
-      return r;
-    }))
+    caches.match(req).then(cached =>
+      cached || fetch(req).then(r => {
+        if (r && r.status === 200 && req.method === 'GET') {
+          const clone = r.clone();
+          caches.open(CACHE_NAME).then(c => c.put(req, clone)).catch(() => {});
+        }
+        return r;
+      })
+    )
   );
 });
   `;
+
   try {
     var blob = new Blob([swCode], { type: 'application/javascript' });
     var swUrl = URL.createObjectURL(blob);
-    navigator.serviceWorker.register(swUrl).then(function(reg) {
-      // registro SW silencioso en producción
-    }).catch(function(err) {
-      // Silencioso — el SW es opcional, no afecta al funcionamiento de la app
+    navigator.serviceWorker.register(swUrl).then(function (reg) {
+      // Buscar actualizaciones al abrir la app
+      try { reg.update(); } catch (e) {}
+      // Si entra una versión nueva, recargar automáticamente
+      reg.addEventListener('updatefound', function () {
+        var nuevo = reg.installing;
+        if (!nuevo) return;
+        nuevo.addEventListener('statechange', function () {
+          if (nuevo.state === 'activated' && navigator.serviceWorker.controller) {
+            window.location.reload();
+          }
+        });
+      });
+    }).catch(function (err) {
+      // El SW es opcional: si falla, la app funciona igual
     });
-  } catch(e) {
-    // Entorno sin soporte de blob SW — ignorar silenciosamente
-  }
+  } catch (e) {}
+}
+
+// Botón de emergencia: borra toda la caché y recarga (por si se queda pillada)
+function thryxForzarActualizacion() {
+  var fin = function () { window.location.reload(true); };
+  try {
+    if ('caches' in window) {
+      caches.keys().then(function (ks) {
+        return Promise.all(ks.map(function (k) { return caches.delete(k); }));
+      }).then(function () {
+        if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+          return navigator.serviceWorker.getRegistrations().then(function (rs) {
+            return Promise.all(rs.map(function (r) { return r.unregister(); }));
+          });
+        }
+      }).then(fin).catch(fin);
+    } else { fin(); }
+  } catch (e) { fin(); }
 }
 </script>
 <style>
@@ -4984,6 +5038,9 @@ self.addEventListener('fetch', e => {
           🏭 <span id="_maqBadge">Elegir mis máquinas</span> <span style="font-weight:600;">›</span>
         </button>
       </div>
+      <button onclick="abrirSelectorHitEquip()" style="width:100%;margin-top:8px;padding:13px;background:#F9731615;border:2px solid #F97316;border-radius:12px;font-size:12px;font-weight:800;color:#EA580C;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px;">
+        🔥 <span id="_hitEqBadge">Elegir mi material de HIT/WOD</span> <span style="font-weight:600;">›</span>
+      </button>
 
       <div class="step-header" style="margin-top:8px;">
         <div class="step-eyebrow">Objetivo de tiempo</div>
@@ -5065,6 +5122,13 @@ self.addEventListener('fetch', e => {
         <div style="font-size:16px;font-weight:900;color:#fff;margin-bottom:4px;">Generar mi rutina automáticamente</div>
         <div style="font-size:11px;color:rgba(255,255,255,0.9);line-height:1.5;margin-bottom:14px;">Con tu objetivo, nivel, días, tiempo, equipamiento y las máquinas que tengas. Se agenda sola en tu calendario.</div>
         <button onclick="generarRutinaYAgendar()" style="width:100%;padding:14px;background:#fff;color:#16A34A;border:none;border-radius:12px;font-size:14px;font-weight:900;cursor:pointer;font-family:inherit;">⚡ Generar y agendar rutina</button>
+      </div>
+
+      <div style="margin-top:12px;background:linear-gradient(135deg,#F97316,#FB923C);border-radius:16px;padding:18px 16px;text-align:center;">
+        <div style="font-size:30px;margin-bottom:5px;">🔥</div>
+        <div style="font-size:16px;font-weight:900;color:#fff;margin-bottom:4px;">Generar mi WOD automáticamente</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.92);line-height:1.5;margin-bottom:14px;">AMRAP, EMOM, For Time, Tabata o Chipper según tu tiempo, nivel y material.</div>
+        <button onclick="generarWodYAgendar()" style="width:100%;padding:14px;background:#fff;color:#EA580C;border:none;border-radius:12px;font-size:14px;font-weight:900;cursor:pointer;font-family:inherit;">⚡ Generar y agendar WOD</button>
       </div>
       <div id="tiempoSesionConsejoPanel" style="display:none;margin-top:18px;"></div>
     </div>
@@ -5227,6 +5291,21 @@ self.addEventListener('fetch', e => {
           <button onclick="abrirSelectorMaquinas()" style="width:100%;margin-top:10px;padding:13px;background:var(--green-light);border:2px solid var(--green);border-radius:12px;font-size:12px;font-weight:800;color:var(--green-dark);cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px;">
             🏭 <span id="_maqBadge2">Elegir mis máquinas</span> <span style="font-weight:600;">›</span>
           </button>
+        </div>
+      </div>
+
+      <!-- MATERIAL DE HIT / WOD (CrossFit) -->
+      <div class="edit-section">
+        <div class="edit-section-title">🔥 Material de HIT / WOD</div>
+        <div style="font-size:11px;color:var(--text-muted);line-height:1.5;margin-bottom:10px;">¿Qué material de CrossFit tienes? El WOD se generará solo con lo que marques.</div>
+        <button onclick="abrirSelectorHitEquip()" style="width:100%;padding:13px;background:#F9731615;border:2px solid #F97316;border-radius:12px;font-size:12px;font-weight:800;color:#EA580C;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:8px;">
+          🔥 <span id="_hitEqBadge2">Elegir mi material de HIT/WOD</span> <span style="font-weight:600;">›</span>
+        </button>
+        <div style="margin-top:12px;background:linear-gradient(135deg,#F97316,#FB923C);border-radius:16px;padding:18px 16px;text-align:center;">
+          <div style="font-size:30px;margin-bottom:5px;">🔥</div>
+          <div style="font-size:16px;font-weight:900;color:#fff;margin-bottom:4px;">Generar mi WOD automáticamente</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.92);line-height:1.5;margin-bottom:14px;">AMRAP, EMOM, For Time, Tabata o Chipper según tu tiempo, nivel y material. Se agenda sola en tu calendario.</div>
+          <button onclick="generarWodYAgendar()" style="width:100%;padding:14px;background:#fff;color:#EA580C;border:none;border-radius:12px;font-size:14px;font-weight:900;cursor:pointer;font-family:inherit;">⚡ Generar y agendar WOD</button>
         </div>
       </div>
 
@@ -7456,6 +7535,7 @@ function cargarDatosEdicion() {
     el.classList.toggle('selected', datos.equipamiento.indexOf(el.getAttribute('data-equip')) !== -1);
   });
   if (typeof _actualizarBotonMaquinas === 'function') _actualizarBotonMaquinas();
+  if (typeof _hitEqRefrescar === 'function') _hitEqRefrescar();
 
   // Tiempo sesión
   var sl = document.getElementById('edt_sessionSlider');
@@ -19857,7 +19937,8 @@ function buildDiarioTab() {
 
   // Conectar IA (API key) — necesario para que las fotos con IA funcionen en la web publicada
   var _iaOn = (typeof _thryxTieneClaveIA === 'function' && _thryxTieneClaveIA());
-  html += '<button onclick="configurarClaveIA()" style="width:100%;padding:9px;background:var(--card);border:1.5px solid ' + (_iaOn ? 'var(--green)' : 'var(--border)') + ';color:' + (_iaOn ? 'var(--green)' : 'var(--text-muted)') + ';border-radius:10px;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:12px;">' + (_iaOn ? '🔑 IA conectada · toca para cambiar tu clave' : '🔑 Conectar IA para las fotos (pega tu API key)') + '</button>';
+  html += '<button onclick="configurarClaveIA()" style="width:100%;padding:9px;background:var(--card);border:1.5px solid ' + (_iaOn ? 'var(--green)' : 'var(--border)') + ';color:' + (_iaOn ? 'var(--green)' : 'var(--text-muted)') + ';border-radius:10px;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:8px;">' + (_iaOn ? '🔑 IA conectada · toca para cambiar tu clave' : '🔑 Conectar IA para las fotos (pega tu API key)') + '</button>';
+  html += '<button onclick="thryxForzarActualizacion()" style="width:100%;padding:9px;background:var(--card);border:1.5px solid var(--border);color:var(--text-muted);border-radius:10px;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:12px;">🔄 Forzar actualización (borra la caché)</button>';
 
   // Banner de ayuno activo
   try {
@@ -41501,6 +41582,305 @@ function _pmStep(i, d) {
   if (v < 0) v = 0;
   el.value = v;
   _pmCambiar(i);
+}
+
+
+/* ================================================================
+   THRYX — MATERIAL DE HIT/WOD + GENERADOR DE WOD
+   Igual que "Mis máquinas", pero para CrossFit: eliges qué material
+   tienes (16 categorías, con GIFs) y genera un WOD que se agenda.
+   ================================================================ */
+
+/* ─────── 1) MI MATERIAL DE HIT/WOD ─────── */
+function _misHitEquip() {
+  if (!datos.hitEquip) {
+    try {
+      var r = localStorage.getItem(userKey(currentUserName, 'mis_equip_hit'));
+      datos.hitEquip = r ? JSON.parse(r) : [];
+    } catch (e) { datos.hitEquip = []; }
+  }
+  return datos.hitEquip;
+}
+function _guardarHitEquip() {
+  try { localStorage.setItem(userKey(currentUserName, 'mis_equip_hit'), JSON.stringify(datos.hitEquip || [])); } catch (e) {}
+  if (typeof guardarDatosUsuario === 'function') guardarDatosUsuario();
+}
+function _hitEjercsDe(key) {
+  try { return (_HIT_EQUIP_DATA[key] || []); } catch (e) { return []; }
+}
+
+var _hitEquipAbierto = null;   // categoría desplegada
+
+function abrirSelectorHitEquip() {
+  var mias = _misHitEquip();
+
+  var h = '<div style="line-height:1.5;">';
+  h += '<div style="background:var(--green-light);border-radius:10px;padding:11px;font-size:11px;color:var(--text);margin-bottom:12px;">Marca el material de <b>CrossFit / HIT</b> que tienes. El WOD se generará solo con esos ejercicios. Toca la flecha para ver los ejercicios y sus GIFs.</div>';
+
+  h += '<div style="display:flex;gap:6px;margin-bottom:10px;">';
+  h += '<button onclick="_hitEqTodas(1)" style="flex:1;padding:9px;border-radius:9px;border:1.5px solid var(--border);background:var(--card);color:var(--text);font-size:11px;font-weight:800;cursor:pointer;font-family:inherit;">✅ Todo</button>';
+  h += '<button onclick="_hitEqTodas(0)" style="flex:1;padding:9px;border-radius:9px;border:1.5px solid var(--border);background:var(--card);color:var(--text);font-size:11px;font-weight:800;cursor:pointer;font-family:inherit;">❌ Nada</button>';
+  h += '</div>';
+  h += '<div id="_hitEqCount" style="text-align:center;font-size:11px;font-weight:800;color:var(--green);margin-bottom:10px;"></div>';
+
+  _HIT_EQUIP_ORDER.forEach(function (key) {
+    var m = _HIT_EQUIP_META[key];
+    var ejs = _hitEjercsDe(key);
+    var on = mias.indexOf(key) !== -1;
+    var abierto = (_hitEquipAbierto === key);
+
+    h += '<div style="border:2px solid ' + (on ? 'var(--green)' : 'var(--border)') + ';border-radius:12px;margin-bottom:7px;overflow:hidden;">';
+    h += '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:' + (on ? 'var(--green-light)' : 'var(--card)') + ';">';
+    h += '<div onclick="_hitEqToggle(\'' + key + '\')" style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;cursor:pointer;">';
+    h += '<span style="font-size:22px;">' + m.icon + '</span>';
+    h += '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:800;color:var(--text);">' + m.label + '</div>';
+    h += '<div style="font-size:10px;color:var(--text-muted);">' + ejs.length + ' ejercicios</div></div>';
+    h += '<span style="font-size:18px;flex-shrink:0;">' + (on ? '✅' : '⬜') + '</span>';
+    h += '</div>';
+    h += '<button onclick="_hitEqVer(\'' + key + '\')" style="width:30px;height:30px;flex-shrink:0;border-radius:8px;border:1.5px solid var(--border);background:var(--card);color:var(--text-muted);font-size:11px;cursor:pointer;font-family:inherit;">' + (abierto ? '▲' : '▼') + '</button>';
+    h += '</div>';
+
+    if (abierto) {
+      h += '<div style="padding:8px 10px;background:var(--bg);max-height:280px;overflow-y:auto;overscroll-behavior:contain;">';
+      ejs.forEach(function (e) {
+        h += '<div style="display:flex;align-items:center;gap:9px;background:var(--card);border-radius:9px;padding:7px 9px;margin-bottom:5px;">';
+        h += (typeof thryxThumbBox === 'function' ? thryxThumbBox(e.n) : '');
+        h += '<div style="flex:1;min-width:0;"><div style="font-size:11px;font-weight:700;color:var(--text);">' + e.n + '</div>';
+        h += '<div style="font-size:9px;color:var(--text-muted);">' + (e.m || '') + ' · ' + (e.d || '') + '</div></div>';
+        if (e.yt) h += '<a href="' + e.yt + '" target="_blank" rel="noopener" style="flex-shrink:0;background:#FF0000;color:#fff;border-radius:7px;padding:5px 8px;text-decoration:none;font-size:9px;font-weight:800;">▶</a>';
+        h += '</div>';
+      });
+      h += '</div>';
+    }
+    h += '</div>';
+  });
+
+  h += '<button onclick="_hitEqGuardar()" style="width:100%;margin-top:12px;padding:13px;background:var(--green);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:900;cursor:pointer;font-family:inherit;">💾 Guardar mi material</button>';
+  h += '</div>';
+
+  if (typeof _openWellnessModal === 'function') _openWellnessModal(h, '🔥 Mi material de HIT/WOD');
+  _hitEqRefrescar();
+}
+
+function _hitEqToggle(key) {
+  var mias = _misHitEquip();
+  var i = mias.indexOf(key);
+  if (i === -1) mias.push(key); else mias.splice(i, 1);
+  abrirSelectorHitEquip();
+}
+function _hitEqVer(key) {
+  _hitEquipAbierto = (_hitEquipAbierto === key) ? null : key;
+  abrirSelectorHitEquip();
+}
+function _hitEqTodas(todas) {
+  datos.hitEquip = todas ? _HIT_EQUIP_ORDER.slice() : [];
+  abrirSelectorHitEquip();
+}
+function _hitEqRefrescar() {
+  var n = _misHitEquip().length;
+  var el = document.getElementById('_hitEqCount');
+  if (el) {
+    var tot = 0;
+    _misHitEquip().forEach(function (k) { tot += _hitEjercsDe(k).length; });
+    el.textContent = n + ' de ' + _HIT_EQUIP_ORDER.length + ' materiales · ' + tot + ' ejercicios disponibles';
+  }
+  var txt = n > 0 ? (n + ' materiales seleccionados') : 'Elegir mi material de HIT/WOD';
+  ['_hitEqBadge', '_hitEqBadge2'].forEach(function (id) {
+    var b = document.getElementById(id);
+    if (b) b.textContent = txt;
+  });
+}
+function _hitEqGuardar() {
+  _guardarHitEquip();
+  if (typeof cerrarWellnessModal === 'function') cerrarWellnessModal();
+  if (typeof showToast === 'function') showToast('✅ ' + _misHitEquip().length + ' materiales guardados');
+  _hitEqRefrescar();
+}
+
+/* ─────── 2) GENERADOR DE WOD ─────── */
+
+// Formatos de WOD según el tiempo disponible
+var _WOD_FORMATOS = [
+  { tipo:'AMRAP',    min:12, ejercs:3, desc:'Tantas rondas como puedas en el tiempo' },
+  { tipo:'FOR TIME', min:15, ejercs:3, desc:'Completa las rondas lo más rápido posible' },
+  { tipo:'EMOM',     min:16, ejercs:4, desc:'Un ejercicio cada minuto' },
+  { tipo:'TABATA',   min:8,  ejercs:4, desc:'20 s trabajo / 10 s descanso × 8' },
+  { tipo:'CHIPPER',  min:20, ejercs:5, desc:'Una sola ronda larga, ejercicio a ejercicio' }
+];
+
+function _hitNivelPermitido() {
+  var n = (datos.nivel || 'medio').toLowerCase();
+  if (n.indexOf('prin') !== -1) return ['Principiante'];
+  if (n.indexOf('avan') !== -1 || n.indexOf('elite') !== -1) return ['Principiante', 'Intermedio', 'Avanzado'];
+  return ['Principiante', 'Intermedio'];
+}
+
+// Ejercicios disponibles según el material marcado
+function _hitPool() {
+  var mias = _misHitEquip();
+  var claves = mias.length ? mias : _HIT_EQUIP_ORDER;   // si no marca nada, todo
+  var difs = _hitNivelPermitido();
+  var pool = [];
+  claves.forEach(function (k) {
+    _hitEjercsDe(k).forEach(function (e) {
+      if (difs.indexOf(e.d) !== -1) pool.push(Object.assign({}, e, { equip: k }));
+    });
+  });
+  // Si el nivel deja muy pocos, relajar el filtro
+  if (pool.length < 8) {
+    pool = [];
+    claves.forEach(function (k) {
+      _hitEjercsDe(k).forEach(function (e) { pool.push(Object.assign({}, e, { equip: k })); });
+    });
+  }
+  return pool;
+}
+
+function generarWodYAgendar() {
+  if (!datos.dias || !datos.dias.length) { showToast('⚠️ Elige tus días de entrenamiento'); return; }
+  if (!datos.nivel) { showToast('⚠️ Elige tu nivel'); return; }
+
+  var pool = _hitPool();
+  if (pool.length < 6) { showToast('⚠️ Marca más material para generar un WOD'); return; }
+
+  var min = datos.tiempoSesion || 45;
+  var usados = {};
+  var diasData = [];
+
+  datos.dias.forEach(function (d, i) {
+    // Elegir formato: variado entre días y acorde al tiempo
+    var posibles = _WOD_FORMATOS.filter(function (f) { return f.min <= Math.max(10, min - 10); });
+    if (!posibles.length) posibles = [_WOD_FORMATOS[3]];   // TABATA (el más corto)
+    var f = posibles[i % posibles.length];
+
+    // Elegir ejercicios sin repetir entre días
+    var cand = pool.filter(function (e) { return !usados[e.n]; });
+    if (cand.length < f.ejercs) { usados = {}; cand = pool.slice(); }
+
+    var elegidos = [];
+    // Mezclar para que no salga siempre lo mismo
+    var mezcla = cand.slice().sort(function () { return Math.random() - 0.5; });
+    for (var k = 0; k < mezcla.length && elegidos.length < f.ejercs; k++) {
+      var e = mezcla[k];
+      // evitar dos del mismo material seguidos si se puede
+      if (elegidos.some(function (x) { return x.equip === e.equip; }) && elegidos.length < f.ejercs - 1) continue;
+      elegidos.push(e);
+      usados[e.n] = true;
+    }
+    while (elegidos.length < f.ejercs && mezcla.length) {
+      var extra = mezcla.shift();
+      if (elegidos.indexOf(extra) === -1) { elegidos.push(extra); usados[extra.n] = true; }
+    }
+
+    var reps = (f.tipo === 'TABATA') ? '20 s' : (f.tipo === 'EMOM' ? '8-12' : '10-15');
+    var ejercs = elegidos.map(function (e) {
+      return {
+        n: e.n, m: e.m, d: e.d, yt: e.yt, equip: e.equip, reps: reps,
+        series: [{ peso: '', reps: '', rpe: '', completada: false }]
+      };
+    });
+
+    diasData.push({
+      dia: d,
+      foco: f.tipo,
+      tipo: f.tipo,
+      desc: f.desc,
+      timer: { sec: f.min * 60, label: f.tipo, tabata: (f.tipo === 'TABATA') },
+      ejercs: ejercs
+    });
+  });
+
+  _wodGenerado = { diasData: diasData, min: min };
+  _mostrarWodGenerado();
+}
+
+var _wodGenerado = null;
+var _DIA_LARGO = { L:'Lunes', M:'Martes', X:'Miércoles', J:'Jueves', V:'Viernes', S:'Sábado', D:'Domingo' };
+
+function _mostrarWodGenerado() {
+  var w = _wodGenerado; if (!w) return;
+  var mats = _misHitEquip().length;
+
+  var h = '<div style="line-height:1.5;">';
+  h += '<div style="background:var(--green-light);border-radius:12px;padding:12px;margin-bottom:12px;">';
+  h += '<div style="font-size:13px;font-weight:900;color:var(--text);margin-bottom:4px;">🔥 Tu WOD de la semana</div>';
+  h += '<div style="font-size:11px;color:var(--text-muted);line-height:1.6;">📅 ' + w.diasData.length + ' días · 🎚️ ' + (datos.nivel || '') + ' · 🏋️ ' + (mats || _HIT_EQUIP_ORDER.length) + ' materiales</div>';
+  h += '</div>';
+
+  w.diasData.forEach(function (d) {
+    h += '<div style="border:1.5px solid var(--border);border-radius:12px;padding:11px 12px;margin-bottom:8px;">';
+    h += '<div style="display:flex;align-items:center;gap:7px;margin-bottom:2px;">';
+    h += '<span style="font-size:12px;font-weight:900;color:var(--green);">' + (_DIA_LARGO[d.dia] || d.dia) + '</span>';
+    h += '<span style="font-size:9px;font-weight:800;color:#fff;background:#F97316;padding:2px 8px;border-radius:10px;">' + d.tipo + '</span>';
+    h += '<span style="font-size:10px;color:var(--text-muted);margin-left:auto;">⏱️ ' + Math.round(d.timer.sec / 60) + ' min</span>';
+    h += '</div>';
+    h += '<div style="font-size:10px;color:var(--text-muted);margin-bottom:7px;">' + d.desc + '</div>';
+    d.ejercs.forEach(function (e) {
+      h += '<div style="display:flex;align-items:center;gap:9px;background:var(--bg);border-radius:9px;padding:7px 9px;margin-bottom:5px;">';
+      h += (typeof thryxThumbBox === 'function' ? thryxThumbBox(e.n) : '');
+      h += '<div style="flex:1;min-width:0;"><div style="font-size:11px;font-weight:700;color:var(--text);">' + e.n + '</div>';
+      h += '<div style="font-size:9px;color:var(--text-muted);">' + (e.reps || '') + ' · ' + (e.m || '') + '</div></div>';
+      if (e.yt) h += '<a href="' + e.yt + '" target="_blank" rel="noopener" style="flex-shrink:0;background:#FF0000;color:#fff;border-radius:7px;padding:5px 8px;text-decoration:none;font-size:9px;font-weight:800;">▶</a>';
+      h += '</div>';
+    });
+    h += '</div>';
+  });
+
+  h += '<button onclick="_guardarWodAuto()" style="width:100%;margin-top:8px;padding:13px;background:var(--green);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:900;cursor:pointer;font-family:inherit;">📅 Guardar y agendar en mi calendario</button>';
+  h += '<button onclick="generarWodYAgendar()" style="width:100%;margin-top:8px;padding:11px;background:var(--card);border:1.5px solid var(--border);color:var(--text);border-radius:12px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;">🔄 Generar otro distinto</button>';
+  h += '</div>';
+  if (typeof _openWellnessModal === 'function') _openWellnessModal(h, '🔥 WOD generado');
+}
+
+function _guardarWodAuto() {
+  var w = _wodGenerado; if (!w) return;
+  var fecha = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  var nivelIdx = (function () {
+    var n = (datos.nivel || 'medio').toLowerCase();
+    if (n.indexOf('prin') !== -1) return 0;
+    if (n.indexOf('avan') !== -1 || n.indexOf('elite') !== -1) return 2;
+    return 1;
+  })();
+
+  var hit = {
+    id: Date.now(),
+    nombre: 'WOD generado · ' + w.diasData.length + ' días · ' + fecha,
+    fecha: fecha,
+    nivelIdx: nivelIdx,
+    tiempoSes: w.min,
+    equip: _misHitEquip().slice(),
+    nivelNombre: datos.nivel || 'Medio',
+    nivelColor: '#F97316',
+    nivelEmoji: '🔥',
+    gen: 'hombre',
+    params: { series: '1', reps: '10-15' },
+    diasData: w.diasData,
+    auto: true
+  };
+
+  if (typeof misHits === 'undefined') { window.misHits = []; }
+  misHits.unshift(hit);
+  if (typeof guardarDatosUsuario === 'function') guardarDatosUsuario();
+
+  // Agendar en el calendario: cada día como 'hit'
+  var agendados = [];
+  try {
+    var offset = (typeof _calOffset !== 'undefined') ? _calOffset : 0;
+    var sem = _getSemana(offset);
+    w.diasData.forEach(function (d) {
+      sem[d.dia] = 'hit';
+      sem['asig_' + d.dia] = { tipo: 'hit', id: hit.id };
+      agendados.push(_DIA_LARGO[d.dia] || d.dia);
+    });
+    _calSemanas[offset] = sem;
+    guardarCalendario();
+    try { renderCalendarioShared(offset); } catch (e) {}
+  } catch (e) {}
+
+  if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
+  if (typeof cerrarWellnessModal === 'function') cerrarWellnessModal();
+  if (typeof showToast === 'function') showToast('✅ WOD agendado: ' + agendados.join(', '));
+  _wodGenerado = null;
 }
 
 </script>
