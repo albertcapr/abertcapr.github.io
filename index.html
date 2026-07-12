@@ -11,7 +11,7 @@
 
 <!-- PWA: necesario para instalar la app y para generar el APK -->
 <link rel="manifest" href="manifest.json">
-<script>window.THRYX_BUILD = 'v7 · OCR mejorado';</script>
+<script>window.THRYX_BUILD = 'v8 · Recorte de tabla';</script>
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -36,7 +36,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans
 // ================================================================
 if ('serviceWorker' in navigator && window.isSecureContext) {
   // CACHE_VERSION: súbela cada vez que publiques una versión nueva.
-  var THRYX_SW_VERSION = 'thryx-v7';
+  var THRYX_SW_VERSION = 'thryx-v8';
 
   var swCode = `
 const CACHE_NAME = '${THRYX_SW_VERSION}';
@@ -39974,14 +39974,8 @@ function _etiquetaAbrirCamara() {
         });
       });
     } else {
-      // SIN API key: OCR en el propio móvil. Siempre lleva a la pantalla de
-      // revisión, aunque lea poco: así puedes corregir en vez de empezar de cero.
-      _ocrModalCargando();
-      _etiquetaOCR(shot.dataUrl).then(function (b) {
-        ok(b, 'ocr');
-      }).catch(function (e) {
-        _scanFotoError(_scanMsgError(e));
-      });
+      // SIN API key: primero marcas la tabla (mucho más preciso), luego OCR
+      _abrirRecorte(shot.dataUrl);
     }
   }, '🏷️ Foto de la etiqueta', 'Acerca el móvil a la TABLA (que llene la pantalla), enfoca y dispara');
 }
@@ -42212,10 +42206,15 @@ function _parsearEtiqueta(txt) {
   var buscar = function (claves) { return porLinea(claves) || globalB(claves); };
 
   var kcal = 0;
-  var mk = t.match(/([0-9OoIlSs]{2,4})\s*k\s*cal/);
+  // El OCR confunde kcal con "keal", "kca1", "kcai"... aceptamos variantes
+  var mk = t.match(/([0-9OoIlSs]{2,4})\s*k\s*[ce][a4@][li1t]/);
   if (mk) kcal = _ocrNum(mk[1]);
   if (!kcal) {
-    var mj = t.match(/([0-9OoIlSs]{3,5})\s*k\s*j/);
+    var mk2 = t.match(/([0-9OoIlSs]{2,4})\s*c\s*a\s*[li1]/);
+    if (mk2) kcal = _ocrNum(mk2[1]);
+  }
+  if (!kcal) {
+    var mj = t.match(/([0-9OoIlSs]{3,5})\s*k\s*[j1i]/);          // kJ -> kcal
     if (mj) kcal = Math.round(_ocrNum(mj[1]) / 4.184);
   }
   if (!kcal) kcal = buscar(['valor energetico', 'energia', 'energy', 'calorias']);
@@ -42223,9 +42222,9 @@ function _parsearEtiqueta(txt) {
   return {
     kcal: kcal,
     gras: buscar(['grasas', 'lipidos', 'materia grasa', 'grasa', 'fat', 'gordura']),
-    saturadas: buscar(['cuales saturadas', 'saturadas', 'saturados', 'saturated']),
-    carb: buscar(['hidratos de carbono', 'hidratos', 'carbohidratos', 'glucidos', 'carbohydrate']),
-    azucar: buscar(['cuales azucares', 'azucares', 'sugars', 'acucares']),
+    saturadas: buscar(['cuales saturadas', 'saturadas', 'saturados', 'quais saturados', 'saturated']),
+    carb: buscar(['hidratos de carbono', 'hidratos', 'carbohidratos', 'carboidratos', 'glucidos', 'carbohydrate']),
+    azucar: buscar(['cuales azucares', 'azucares', 'quais acucares', 'acucares', 'sugars']),
     fibra: buscar(['fibra alimentaria', 'fibra', 'fibre', 'fiber']),
     prot: buscar(['proteinas', 'proteina', 'protein']),
     sal: buscar(['sal', 'sodio', 'salt'])
@@ -42278,6 +42277,125 @@ function _ocrModalCargando() {
   b += '<div style="font-size:10px;color:var(--text-muted);margin-top:8px;">La primera vez tarda un poco más (descarga el lector).</div>';
   b += '</div>';
   if (typeof _openWellnessModal === 'function') _openWellnessModal(b, '🏷️ Foto de la etiqueta');
+}
+
+
+/* ================================================================
+   THRYX — RECORTE DE LA TABLA NUTRICIONAL
+   El usuario marca el recuadro sobre la tabla (una sola columna /
+   un solo idioma) y el OCR lee SOLO esa zona. Mucho más preciso.
+   ================================================================ */
+var _cropImg = null;
+var _cropBox = { x: 0.08, y: 0.30, w: 0.84, h: 0.45 };   // en proporción (0-1)
+var _cropDrag = null;
+
+function _abrirRecorte(dataUrl) {
+  _cropImg = dataUrl;
+  _cropBox = { x: 0.08, y: 0.30, w: 0.84, h: 0.45 };
+
+  var b = '<div style="line-height:1.5;">';
+  b += '<div style="background:var(--green-light);border-radius:10px;padding:10px 12px;font-size:11px;color:var(--text);margin-bottom:10px;line-height:1.5;">Arrastra el recuadro sobre <b>la tabla nutricional</b>. Si la etiqueta está en dos idiomas, marca <b>solo uno</b>.</div>';
+
+  b += '<div id="_cropWrap" style="position:relative;width:100%;border-radius:12px;overflow:hidden;background:#000;touch-action:none;user-select:none;">';
+  b += '<img id="_cropIm" src="' + dataUrl + '" style="width:100%;display:block;">';
+  b += '<div id="_cropRect" style="position:absolute;border:2.5px solid #22C55E;box-shadow:0 0 0 9999px rgba(0,0,0,.55);border-radius:4px;">';
+  b += '<div class="_ch" data-h="nw" style="position:absolute;left:-11px;top:-11px;width:22px;height:22px;background:#22C55E;border-radius:50%;border:2px solid #fff;"></div>';
+  b += '<div class="_ch" data-h="se" style="position:absolute;right:-11px;bottom:-11px;width:22px;height:22px;background:#22C55E;border-radius:50%;border:2px solid #fff;"></div>';
+  b += '</div></div>';
+
+  b += '<button onclick="_cropLeer()" style="width:100%;margin-top:12px;padding:14px;background:var(--green);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:900;cursor:pointer;font-family:inherit;">🔎 Leer esta zona</button>';
+  b += '<button onclick="cerrarWellnessModal();_etiquetaAbrirCamara();" style="width:100%;margin-top:8px;padding:11px;background:var(--card);border:1.5px solid var(--border);color:var(--text);border-radius:12px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;">📷 Repetir foto</button>';
+  b += '</div>';
+
+  if (typeof _openWellnessModal === 'function') _openWellnessModal(b, '✂️ Marca la tabla');
+  setTimeout(_cropInit, 120);
+}
+
+function _cropInit() {
+  var wrap = document.getElementById('_cropWrap');
+  if (!wrap) return;
+  _cropPintar();
+
+  var punto = function (e) {
+    var r = wrap.getBoundingClientRect();
+    var t = (e.touches && e.touches[0]) ? e.touches[0] : e;
+    return { x: (t.clientX - r.left) / r.width, y: (t.clientY - r.top) / r.height };
+  };
+
+  var start = function (e) {
+    var p = punto(e);
+    var h = e.target.getAttribute && e.target.getAttribute('data-h');
+    _cropDrag = { modo: h || 'mover', ini: p, box: Object.assign({}, _cropBox) };
+    e.preventDefault();
+  };
+  var move = function (e) {
+    if (!_cropDrag) return;
+    var p = punto(e);
+    var dx = p.x - _cropDrag.ini.x, dy = p.y - _cropDrag.ini.y;
+    var b0 = _cropDrag.box;
+    var nb = Object.assign({}, _cropBox);
+
+    if (_cropDrag.modo === 'mover') {
+      nb.x = Math.min(Math.max(0, b0.x + dx), 1 - b0.w);
+      nb.y = Math.min(Math.max(0, b0.y + dy), 1 - b0.h);
+      nb.w = b0.w; nb.h = b0.h;
+    } else if (_cropDrag.modo === 'nw') {
+      nb.x = Math.min(Math.max(0, b0.x + dx), b0.x + b0.w - 0.12);
+      nb.y = Math.min(Math.max(0, b0.y + dy), b0.y + b0.h - 0.08);
+      nb.w = b0.w - (nb.x - b0.x);
+      nb.h = b0.h - (nb.y - b0.y);
+    } else if (_cropDrag.modo === 'se') {
+      nb.w = Math.min(Math.max(0.12, b0.w + dx), 1 - b0.x);
+      nb.h = Math.min(Math.max(0.08, b0.h + dy), 1 - b0.y);
+    }
+    _cropBox = nb;
+    _cropPintar();
+    e.preventDefault();
+  };
+  var end = function () { _cropDrag = null; };
+
+  wrap.addEventListener('touchstart', start, { passive: false });
+  wrap.addEventListener('touchmove', move, { passive: false });
+  wrap.addEventListener('touchend', end);
+  wrap.addEventListener('mousedown', start);
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', end);
+}
+
+function _cropPintar() {
+  var r = document.getElementById('_cropRect');
+  if (!r) return;
+  r.style.left = (_cropBox.x * 100) + '%';
+  r.style.top = (_cropBox.y * 100) + '%';
+  r.style.width = (_cropBox.w * 100) + '%';
+  r.style.height = (_cropBox.h * 100) + '%';
+}
+
+// Recorta la zona marcada y la manda al OCR
+function _cropLeer() {
+  var img = new Image();
+  img.onload = function () {
+    var sx = Math.round(_cropBox.x * img.width);
+    var sy = Math.round(_cropBox.y * img.height);
+    var sw = Math.round(_cropBox.w * img.width);
+    var sh = Math.round(_cropBox.h * img.height);
+
+    var c = document.createElement('canvas');
+    c.width = sw; c.height = sh;
+    c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+    var recorte = c.toDataURL('image/png');
+
+    _ocrModalCargando();
+    _etiquetaOCR(recorte).then(function (a) {
+      a.foto = _cropImg;
+      a.via = 'ocr';
+      _etqActual = a;
+      _etiquetaRevisar();
+    }).catch(function (e) {
+      _scanFotoError(_scanMsgError(e));
+    });
+  };
+  img.src = _cropImg;
 }
 
 </script>
