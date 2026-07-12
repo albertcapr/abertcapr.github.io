@@ -11,7 +11,7 @@
 
 <!-- PWA: necesario para instalar la app y para generar el APK -->
 <link rel="manifest" href="manifest.json">
-<script>window.THRYX_BUILD = 'v6 · SIN API KEY en cámara';</script>
+<script>window.THRYX_BUILD = 'v7 · OCR mejorado';</script>
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -36,7 +36,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans
 // ================================================================
 if ('serviceWorker' in navigator && window.isSecureContext) {
   // CACHE_VERSION: súbela cada vez que publiques una versión nueva.
-  var THRYX_SW_VERSION = 'thryx-v6';
+  var THRYX_SW_VERSION = 'thryx-v7';
 
   var swCode = `
 const CACHE_NAME = '${THRYX_SW_VERSION}';
@@ -39963,31 +39963,27 @@ function _etiquetaAbrirCamara() {
         if (a) { ok(a, 'ia'); return; }
         // Si la IA falla, probamos con el OCR del móvil
         _ocrModalCargando();
-        return _etiquetaOCR(shot.dataUrl).then(function (b) {
-          if (b) ok(b, 'ocr');
-          else _scanFotoError('No he podido leer la tabla. Acércate más, enfoca y evita reflejos.');
-        });
+        return _etiquetaOCR(shot.dataUrl).then(function (b) { ok(b, 'ocr'); });
       }).catch(function () {
         // Error de la IA (clave, red...): tiramos de OCR local igualmente
         _ocrModalCargando();
         _etiquetaOCR(shot.dataUrl).then(function (b) {
-          if (b) ok(b, 'ocr');
-          else _scanFotoError('No he podido leer la tabla. Acércate más, enfoca y evita reflejos.');
+          ok(b, 'ocr');
         }).catch(function (e2) {
           _scanFotoError(_scanMsgError(e2));
         });
       });
     } else {
-      // SIN API key: OCR en el propio móvil. Funciona igual.
+      // SIN API key: OCR en el propio móvil. Siempre lleva a la pantalla de
+      // revisión, aunque lea poco: así puedes corregir en vez de empezar de cero.
       _ocrModalCargando();
       _etiquetaOCR(shot.dataUrl).then(function (b) {
-        if (b) ok(b, 'ocr');
-        else _scanFotoError('No he podido leer la tabla. Acércate más, enfoca y evita reflejos.');
+        ok(b, 'ocr');
       }).catch(function (e) {
         _scanFotoError(_scanMsgError(e));
       });
     }
-  }, '🏷️ Foto de la etiqueta', 'Encuadra la tabla nutricional y dispara');
+  }, '🏷️ Foto de la etiqueta', 'Acerca el móvil a la TABLA (que llene la pantalla), enfoca y dispara');
 }
 
 // Traduce el fallo real a un mensaje útil (en vez de un genérico)
@@ -40082,6 +40078,15 @@ function _etiquetaIA(base64, mediaType) {
 // Ficha COMPLETA: todo lo que pone la etiqueta, editable, antes de guardar
 function _etiquetaRevisar() {
   var a = _etqActual; if (!a) return;
+  var _avisoOCR = '';
+  if (a.via === 'ocr') {
+    var _l = (typeof a.leidos === 'number') ? a.leidos : 4;
+    if (_l >= 3) {
+      _avisoOCR = '<div style="background:var(--green-light);border-radius:10px;padding:9px 11px;font-size:11px;color:var(--text);margin-bottom:10px;line-height:1.5;">📱 Leído <b>en tu móvil</b>, sin clave. He sacado <b>' + _l + ' de 4</b> valores. Revísalos y corrige lo que no cuadre.</div>';
+    } else {
+      _avisoOCR = '<div style="background:#F59E0B15;border:1.5px solid #F59E0B50;border-radius:10px;padding:9px 11px;font-size:11px;color:var(--text);margin-bottom:10px;line-height:1.5;">⚠️ La foto ha salido difícil de leer (solo <b>' + _l + ' de 4</b> valores). Escribe tú los que falten mirando la etiqueta, o repite la foto <b>más cerca</b> y con buena luz.</div>';
+    }
+  }
   var fila = function (id, label, val, unidad) {
     return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);">' +
       '<span style="flex:1;font-size:12px;color:var(--text);">' + label + '</span>' +
@@ -40090,6 +40095,7 @@ function _etiquetaRevisar() {
   };
 
   var b = '<div style="line-height:1.5;">';
+  b += _avisoOCR;
   if (a.foto) b += '<img src="' + a.foto + '" style="width:100%;max-height:130px;object-fit:cover;border-radius:12px;margin-bottom:10px;">';
   b += '<div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">Esto es <b>todo lo que he leído</b> en la etiqueta. Corrige lo que no cuadre y confirma.</div>';
 
@@ -42108,59 +42114,133 @@ function _cargarTesseract() {
     sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/tesseract.min.js';
     sc.onload = function () {
       if (window.Tesseract) resolve(window.Tesseract);
-      else reject(new Error('no se pudo cargar el lector'));
+      else reject(new Error('No se pudo cargar el lector.'));
     };
-    sc.onerror = function () { reject(new Error('No se pudo descargar el lector de etiquetas. Necesitas conexión la primera vez.')); };
+    sc.onerror = function () { reject(new Error('No se pudo descargar el lector. Necesitas conexión la primera vez.')); };
     document.head.appendChild(sc);
+  });
+}
+
+/* Preprocesa la foto: escala de grises + más contraste + ampliada.
+   Esto es lo que más mejora la lectura de una etiqueta. */
+function _prepararFotoOCR(dataUrl) {
+  return new Promise(function (resolve) {
+    var img = new Image();
+    img.onload = function () {
+      // Ampliar hasta ~1800 px de ancho (el OCR necesita letra grande)
+      var objetivo = 1800;
+      var esc = Math.min(3, Math.max(1, objetivo / img.width));
+      var w = Math.round(img.width * esc), h = Math.round(img.height * esc);
+
+      var c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      var ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+
+      var d = ctx.getImageData(0, 0, w, h);
+      var px = d.data;
+
+      // 1) gris + media para el umbral
+      var suma = 0;
+      for (var i = 0; i < px.length; i += 4) {
+        var g = (px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114);
+        px[i] = px[i + 1] = px[i + 2] = g;
+        suma += g;
+      }
+      var media = suma / (px.length / 4);
+
+      // 2) estirar el contraste alrededor de la media (texto negro sobre fondo claro)
+      for (var j = 0; j < px.length; j += 4) {
+        var v = px[j];
+        v = (v - media) * 1.9 + media;       // más contraste
+        v = v < 0 ? 0 : v > 255 ? 255 : v;
+        px[j] = px[j + 1] = px[j + 2] = v;
+      }
+      ctx.putImageData(d, 0, 0);
+      resolve(c.toDataURL('image/png'));
+    };
+    img.onerror = function () { resolve(dataUrl); };   // si falla, usamos la original
+    img.src = dataUrl;
   });
 }
 
 function _ocrNum(t) {
   if (!t) return 0;
-  t = String(t).replace(/,/g, '.').replace(/[^\d.]/g, '');
+  t = String(t)
+    .replace(/[Oo]/g, '0').replace(/[lI|]/g, '1').replace(/[Ss]/g, '5')
+    .replace(/,/g, '.').replace(/[^\d.]/g, '');
+  var p = t.split('.');
+  if (p.length > 2) t = p[0] + '.' + p.slice(1).join('');
   var v = parseFloat(t);
   return isNaN(v) ? 0 : v;
 }
 
-// Extrae los valores nutricionales del texto que ha leído el OCR
-function _parsearEtiqueta(txt) {
-  var t = (txt || '').toLowerCase().replace(/[|¦]/g, ' ').replace(/\s+/g, ' ');
+function _limpiaOCR(x) {
+  return (x || '').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[|\u00A6_]/g, ' ')
+    .replace(/[^a-z0-9.,%\s]/g, ' ')
+    .replace(/\s+/g, ' ');
+}
 
-  var buscar = function (claves) {
+function _parsearEtiqueta(txt) {
+  var lineas = (txt || '').split('\n');
+  var t = _limpiaOCR(txt);
+
+  var porLinea = function (claves) {
+    for (var L = 0; L < lineas.length; L++) {
+      var ln = _limpiaOCR(lineas[L]);
+      for (var c = 0; c < claves.length; c++) {
+        var pos = ln.indexOf(claves[c]);
+        if (pos !== -1) {
+          var resto = ln.slice(pos + claves[c].length);
+          var m2 = resto.match(/([0-9OoIlSs]*[0-9][0-9OoIlSs]*(?:[.,][0-9OoIlSs]+)?)/);
+          if (m2) return _ocrNum(m2[1]);
+        }
+      }
+    }
+    return 0;
+  };
+  var globalB = function (claves) {
     for (var i = 0; i < claves.length; i++) {
-      var re = new RegExp(claves[i] + '[^0-9]{0,25}([0-9]+(?:[.,][0-9]+)?)', 'i');
+      var re = new RegExp(claves[i] + '[^0-9OoIlSs]{0,30}([0-9OoIlSs]*[0-9][0-9OoIlSs]*(?:[.,][0-9OoIlSs]+)?)');
       var m = t.match(re);
       if (m) return _ocrNum(m[1]);
     }
     return 0;
   };
+  var buscar = function (claves) { return porLinea(claves) || globalB(claves); };
 
-  // Energía: preferimos kcal; si solo hay kJ, convertimos
   var kcal = 0;
-  var mk = t.match(/([0-9]{2,4})\s*kcal/);
+  var mk = t.match(/([0-9OoIlSs]{2,4})\s*k\s*cal/);
   if (mk) kcal = _ocrNum(mk[1]);
   if (!kcal) {
-    var mj = t.match(/([0-9]{3,5})\s*kj/);
+    var mj = t.match(/([0-9OoIlSs]{3,5})\s*k\s*j/);
     if (mj) kcal = Math.round(_ocrNum(mj[1]) / 4.184);
   }
-  if (!kcal) kcal = buscar(['valor energetico', 'valor energético', 'energia', 'energía', 'energy']);
+  if (!kcal) kcal = buscar(['valor energetico', 'energia', 'energy', 'calorias']);
 
   return {
     kcal: kcal,
-    gras: buscar(['grasas', 'lipidos', 'lípidos', 'materia grasa', 'fat', 'gordura']),
-    saturadas: buscar(['de las cuales saturadas', 'saturadas', 'saturados', 'saturated']),
+    gras: buscar(['grasas', 'lipidos', 'materia grasa', 'grasa', 'fat', 'gordura']),
+    saturadas: buscar(['cuales saturadas', 'saturadas', 'saturados', 'saturated']),
     carb: buscar(['hidratos de carbono', 'hidratos', 'carbohidratos', 'glucidos', 'carbohydrate']),
-    azucar: buscar(['de los cuales azucares', 'azucares', 'azúcares', 'sugars']),
+    azucar: buscar(['cuales azucares', 'azucares', 'sugars', 'acucares']),
     fibra: buscar(['fibra alimentaria', 'fibra', 'fibre', 'fiber']),
-    prot: buscar(['proteinas', 'proteínas', 'proteina', 'protein']),
-    sal: buscar(['sal ', 'sodio', 'salt'])
+    prot: buscar(['proteinas', 'proteina', 'protein']),
+    sal: buscar(['sal', 'sodio', 'salt'])
   };
 }
 
-// Lee la etiqueta CON EL OCR DEL MÓVIL (sin clave, sin servidor)
+/* Lee la etiqueta en el propio móvil. NUNCA devuelve null:
+   si lee poco, devuelve lo que haya para que el usuario lo corrija. */
 function _etiquetaOCR(dataUrl) {
-  return _cargarTesseract().then(function (T) {
-    return T.recognize(dataUrl, 'spa', {
+  var T;
+  return _cargarTesseract().then(function (tess) {
+    T = tess;
+    return _prepararFotoOCR(dataUrl);
+  }).then(function (limpia) {
+    return T.recognize(limpia, 'spa', {
       logger: function (m) {
         if (m.status === 'recognizing text') {
           var el = document.getElementById('_ocrPct');
@@ -42171,7 +42251,7 @@ function _etiquetaOCR(dataUrl) {
   }).then(function (res) {
     var txt = (res && res.data && res.data.text) || '';
     var v = _parsearEtiqueta(txt);
-    if (!v.kcal && !v.prot && !v.carb && !v.gras) return null;   // no ha leído nada
+    var leidos = ['kcal', 'prot', 'carb', 'gras'].filter(function (k) { return v[k] > 0; }).length;
     return {
       nombre: 'Producto escaneado',
       emoji: '🏷️',
@@ -42182,8 +42262,9 @@ function _etiquetaOCR(dataUrl) {
       kcal: v.kcal, prot: v.prot, carb: v.carb, gras: v.gras,
       saturadas: v.saturadas, azucar: v.azucar, fibra: v.fibra, sal: v.sal,
       ingredientes: '',
-      texto: txt.slice(0, 400),
-      via: 'ocr'
+      texto: txt.slice(0, 600),
+      via: 'ocr',
+      leidos: leidos          // cuántos macros ha conseguido leer
     };
   });
 }
